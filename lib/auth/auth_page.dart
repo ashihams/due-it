@@ -72,10 +72,10 @@ class _AuthPageState extends State<AuthPage> {
         ),
         child: SafeArea(
           child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
                 // Logo/Icon
                 Container(
                   padding: const EdgeInsets.all(24),
@@ -111,8 +111,8 @@ class _AuthPageState extends State<AuthPage> {
                   ),
                 ),
                 const SizedBox(height: 40),
-                TextField(
-                  controller: emailController,
+            TextField(
+              controller: emailController,
                   style: AppText.body.copyWith(
                     color: AppColors.textPrimary,
                   ),
@@ -139,8 +139,8 @@ class _AuthPageState extends State<AuthPage> {
                   ),
                 ),
                 const SizedBox(height: 16),
-                TextField(
-                  controller: passwordController,
+            TextField(
+              controller: passwordController,
                   style: AppText.body.copyWith(
                     color: AppColors.textPrimary,
                   ),
@@ -165,8 +165,8 @@ class _AuthPageState extends State<AuthPage> {
                       ),
                     ),
                   ),
-                  obscureText: true,
-                ),
+              obscureText: true,
+            ),
                 const SizedBox(height: 24),
                 if (error.isNotEmpty)
                   Container(
@@ -200,7 +200,7 @@ class _AuthPageState extends State<AuthPage> {
                   width: double.infinity,
                   height: 56,
                   child: ElevatedButton(
-                    onPressed: submit,
+              onPressed: submit,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.primary,
                       foregroundColor: Colors.white,
@@ -217,22 +217,22 @@ class _AuthPageState extends State<AuthPage> {
                       ),
                     ),
                   ),
-                ),
+            ),
                 const SizedBox(height: 16),
-                TextButton(
-                  onPressed: () => setState(() => isLogin = !isLogin),
+            TextButton(
+              onPressed: () => setState(() => isLogin = !isLogin),
                   style: TextButton.styleFrom(
                     foregroundColor: AppColors.textMuted,
                   ),
-                  child: Text(
-                    isLogin
-                        ? "Don't have an account? Sign up"
-                        : "Already have an account? Login",
+              child: Text(
+                isLogin
+                    ? "Don't have an account? Sign up"
+                    : "Already have an account? Login",
                     style: AppText.body.copyWith(
                       color: AppColors.primary,
                     ),
                   ),
-                ),
+              ),
               ],
             ),
           ),

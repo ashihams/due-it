@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'ai_schedule_model.dart';
 
 /// Task model - AI-ready structure
 /// 
@@ -19,6 +20,11 @@ class Task {
   
   // AI planning data (from backend)
   final AIPlanningData? ai;
+  // Raw ai map for schedule parsing (ai.schedule)
+  final Map<String, dynamic>? aiRaw;
+
+  // Notion launchpad page URL (written by backend and/or Flutter NotionService)
+  final String? notionPageUrl;
 
   Task({
     required this.id,
@@ -32,10 +38,28 @@ class Task {
     this.estimatedMinutes,
     this.category,
     this.ai,
+    this.aiRaw,
+    this.notionPageUrl,
   });
 
   factory Task.fromDoc(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+    final raw = doc.data();
+    if (raw == null) {
+      throw FormatException('Task ${doc.id} has no document data');
+    }
+    final data = Map<String, dynamic>.from(raw as Map);
+    final rawAi = data['ai'];
+    Map<String, dynamic>? aiRaw;
+    AIPlanningData? ai;
+    if (rawAi != null && rawAi is Map) {
+      aiRaw = Map<String, dynamic>.from(rawAi);
+      try {
+        ai = AIPlanningData.fromMap(aiRaw);
+      } catch (e) {
+        // Bad `ai` blob must not drop the whole task list — keep raw for schedule UI.
+        ai = null;
+      }
+    }
     return Task(
       id: doc.id,
       title: data['title'] ?? '',
@@ -55,10 +79,89 @@ class Task {
           ? (data['estimatedMinutes'] as num).toInt()
           : null,
       category: data['category'] as String?,
-      ai: data['ai'] != null 
-          ? AIPlanningData.fromMap(data['ai'] as Map<String, dynamic>)
-          : null,
+      ai: ai,
+      aiRaw: aiRaw,
+      // Read from Flutter-written field first, fall back to backend-written field
+      notionPageUrl: (data['notionPageUrl'] ?? data['notionLaunchpadUrl']) as String?,
     );
+  }
+
+  /// Parsed schedule data written by backend under `ai.schedule`
+  TaskAiData? get aiScheduleData {
+    final raw = aiRaw;
+    if (raw == null) return null;
+    try {
+      return TaskAiData.fromMap(raw);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ============================================================
+  // ✅ ANALYTICS COMPUTED GETTERS (for Dashboard)
+  // ============================================================
+
+  /// Total number of microtasks across all schedule days
+  int get totalMicrotasks {
+    final sched = aiRaw?['schedule'] as List<dynamic>? ?? [];
+    return sched.fold(0, (sum, day) {
+      final mts = (day as Map<String, dynamic>)['microtasks'] as List<dynamic>? ?? [];
+      return sum + mts.length;
+    });
+  }
+
+  /// Number of completed microtasks across all schedule days
+  int get completedMicrotasks {
+    final sched = aiRaw?['schedule'] as List<dynamic>? ?? [];
+    return sched.fold(0, (sum, day) {
+      final mts = (day as Map<String, dynamic>)['microtasks'] as List<dynamic>? ?? [];
+      return sum + mts.where((m) => (m as Map<String, dynamic>)['completed'] == true).length;
+    });
+  }
+
+  /// Task is done if all microtasks are completed (or if completed flag is true)
+  bool get isDoneFromMicrotasks {
+    if (completed) return true; // Respect explicit completed flag
+    if (totalMicrotasks == 0) return false;
+    return completedMicrotasks == totalMicrotasks;
+  }
+
+  /// Minutes worked = completedMicrotasks fraction of estimatedMinutes
+  int get minutesWorked {
+    final estimated = estimatedMinutes ?? (ai?.estimatedMinutes ?? 0);
+    if (totalMicrotasks == 0) return 0;
+    return ((completedMicrotasks / totalMicrotasks) * estimated).round();
+  }
+
+  /// Which dates had completed microtasks — returns set of 'YYYY-MM-DD' strings
+  Set<String> get datesWorked {
+    final sched = aiRaw?['schedule'] as List<dynamic>? ?? [];
+    final dates = <String>{};
+    for (final day in sched) {
+      final dayMap = day as Map<String, dynamic>;
+      final mts = dayMap['microtasks'] as List<dynamic>? ?? [];
+      final hasCompleted = mts.any((m) => (m as Map<String, dynamic>)['completed'] == true);
+      if (hasCompleted) {
+        dates.add(dayMap['date'] as String? ?? '');
+      }
+    }
+    return dates;
+  }
+
+  /// Minutes worked on a specific date (YYYY-MM-DD)
+  int minutesWorkedOn(String date) {
+    final sched = aiRaw?['schedule'] as List<dynamic>? ?? [];
+    for (final day in sched) {
+      final dayMap = day as Map<String, dynamic>;
+      if (dayMap['date'] != date) continue;
+      final mts = dayMap['microtasks'] as List<dynamic>? ?? [];
+      final total = mts.length;
+      if (total == 0) return 0;
+      final done = mts.where((m) => (m as Map<String, dynamic>)['completed'] == true).length;
+      final estimated = estimatedMinutes ?? (ai?.estimatedMinutes ?? 0);
+      return ((done / total) * estimated).round();
+    }
+    return 0;
   }
 
   Map<String, dynamic> toMap() {
@@ -86,6 +189,8 @@ class Task {
     int? estimatedMinutes,
     String? category,
     AIPlanningData? ai,
+    Map<String, dynamic>? aiRaw,
+    String? notionPageUrl,
   }) {
     return Task(
       id: id ?? this.id,
@@ -99,6 +204,8 @@ class Task {
       estimatedMinutes: estimatedMinutes ?? this.estimatedMinutes,
       category: category ?? this.category,
       ai: ai ?? this.ai,
+      aiRaw: aiRaw ?? this.aiRaw,
+      notionPageUrl: notionPageUrl ?? this.notionPageUrl,
     );
   }
 }
@@ -173,6 +280,16 @@ class AIPlanningData {
     this.lastPlannedAt,
   });
 
+  static DateTime? _parseLastPlannedAt(dynamic v) {
+    if (v == null) return null;
+    try {
+      if (v is Timestamp) return v.toDate();
+      return DateTime.parse(v.toString());
+    } catch (_) {
+      return null;
+    }
+  }
+
   factory AIPlanningData.fromMap(Map<String, dynamic> map) {
     // Handle actionSteps - could be List<String> or null
     List<String> steps = [];
@@ -205,11 +322,7 @@ class AIPlanningData {
       actionSteps: steps,
       subtasks: parsedSubtasks,
       generated: map['generated'] as bool? ?? false,
-      lastPlannedAt: map['lastPlannedAt'] != null
-          ? (map['lastPlannedAt'] is Timestamp
-              ? (map['lastPlannedAt'] as Timestamp).toDate()
-              : DateTime.parse(map['lastPlannedAt'].toString()))
-          : null,
+      lastPlannedAt: _parseLastPlannedAt(map['lastPlannedAt']),
     );
   }
 

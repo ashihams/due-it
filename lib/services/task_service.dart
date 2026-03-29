@@ -1,5 +1,8 @@
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../models/task.dart';
 import 'ai_planning_service.dart';
+import 'notion_service.dart';
 
 /// Task service for Firestore CRUD operations
 /// 
@@ -8,6 +11,7 @@ import 'ai_planning_service.dart';
 class TaskService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   final AIPlanningService _aiService = AIPlanningService();
+  final NotionService _notionService = NotionService();
 
   /// Get reference to user's tasks collection
   /// CRITICAL: Always use the authenticated user's UID to scope queries
@@ -63,6 +67,17 @@ class TaskService {
         if (success) {
           print('✅ AI planning completed for task: $taskId');
           print('   Duration estimated by Gemini AI');
+          // Non-blocking: generate the Notion launchpad doc after AI plan is ready.
+          // Schedule is passed as [] — the backend reads it from Firestore directly.
+          print('🟡 planTask completed, taskId: $taskId');
+          print('🟡 calling generateDoc now');
+          unawaited(_notionService.generateDoc(
+            taskId: taskId,
+            title: title,
+            deadline: dueDate.toIso8601String().split('T')[0],
+            schedule: [],
+            category: category ?? 'work',
+          ));
         } else {
           print('⚠️ AI planning failed for task: $taskId');
           print('   Will use fallback duration if provided');
@@ -89,6 +104,16 @@ class TaskService {
     return tasksRef(uid)
         .orderBy('createdAt', descending: true)
         .snapshots();
+  }
+
+  /// Fetch one task document by id for immediate UI merge.
+  Future<Task?> fetchTask(String uid, String taskId) async {
+    if (uid.isEmpty) {
+      throw Exception('UID cannot be empty - user must be authenticated');
+    }
+    final doc = await tasksRef(uid).doc(taskId).get();
+    if (!doc.exists) return null;
+    return Task.fromDoc(doc);
   }
 
   /// Toggle task completion status
@@ -138,6 +163,66 @@ class TaskService {
     if (updates.isNotEmpty) {
       await tasksRef(uid).doc(taskId).update(updates);
     }
+  }
+
+  /// Update AI data blob for a task (used for subtask completion updates)
+  /// Keeps backend schema intact by updating only the `ai` field.
+  Future<void> updateAIData({
+    required String uid,
+    required String taskId,
+    required Map<String, dynamic> ai,
+  }) async {
+    if (uid.isEmpty) {
+      throw Exception('UID cannot be empty - user must be authenticated');
+    }
+    await tasksRef(uid).doc(taskId).update({
+      'ai': ai,
+    });
+  }
+
+  /// Explicitly trigger AI planning for a task (FastAPI /plan-task).
+  /// This is a thin wrapper around the existing AIPlanningService.
+  Future<void> planTask(String taskId) async {
+    try {
+      await _aiService.planTask(taskId);
+    } catch (e) {
+      // Keep silent failures from breaking UI flows
+      print('planTask error: $e');
+    }
+  }
+
+  /// Toggle a microtask inside `ai.schedule[*].microtasks[index]` for a given date.
+  /// Persists the completion state back to Firestore.
+  Future<void> toggleMicrotask({
+    required String uid,
+    required String taskId,
+    required String date,
+    required int index,
+    required bool completed,
+  }) async {
+    final ref = tasksRef(uid).doc(taskId);
+    final snap = await ref.get();
+    final data = snap.data() as Map<String, dynamic>?;
+    final aiMap = Map<String, dynamic>.from((data?['ai'] ?? {}) as Map);
+    final schedList = List<dynamic>.from((aiMap['schedule'] ?? []) as List);
+
+    for (int i = 0; i < schedList.length; i++) {
+      final day = Map<String, dynamic>.from(schedList[i] as Map);
+      if (day['date'] == date) {
+        final microtasks = List<dynamic>.from((day['microtasks'] ?? []) as List);
+        if (index < microtasks.length) {
+          final mt = Map<String, dynamic>.from(microtasks[index] as Map);
+          mt['completed'] = completed;
+          microtasks[index] = mt;
+        }
+        day['microtasks'] = microtasks;
+        schedList[i] = day;
+        break;
+      }
+    }
+
+    aiMap['schedule'] = schedList;
+    await ref.update({'ai': aiMap});
   }
 }
 

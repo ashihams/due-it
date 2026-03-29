@@ -42,7 +42,7 @@ class FirestoreTaskProvider with ChangeNotifier {
     if (user == null) {
       _error = 'User not logged in';
       notifyListeners();
-      return;
+      throw StateError('User not logged in');
     }
 
     try {

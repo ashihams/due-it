@@ -1,9 +1,51 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../providers/task_provider.dart';
+import '../../models/ai_schedule_model.dart';
 import '../../models/due_task.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_text.dart';
+import '../../widgets/calendar/calendar_widgets.dart';
+import '../../widgets/home/due_card.dart';
+
+bool _entryDoneForCalendarTask(DueTask task, AiDaySchedule schedule) {
+  if (task.isDone) return true;
+  final mts = schedule.microtasks;
+  if (mts.isEmpty) return false;
+  return mts.every((m) => m.completed);
+}
+
+class _BaseCalendarDayTask {
+  final DueTask task;
+  final AiDaySchedule schedule;
+  final int durationMinutes;
+
+  const _BaseCalendarDayTask({
+    required this.task,
+    required this.schedule,
+    required this.durationMinutes,
+  });
+}
+
+class _CalendarDayTask {
+  final DueTask task;
+  final AiDaySchedule schedule;
+  final int durationMinutes;
+  final double startHour;
+  final String blockId;
+  final String timeRangeLabel;
+
+  const _CalendarDayTask({
+    required this.task,
+    required this.schedule,
+    required this.durationMinutes,
+    required this.startHour,
+    required this.blockId,
+    required this.timeRangeLabel,
+  });
+}
 
 class CalendarScreen extends StatefulWidget {
   const CalendarScreen({super.key});
@@ -14,409 +56,306 @@ class CalendarScreen extends StatefulWidget {
 
 class _CalendarScreenState extends State<CalendarScreen> {
   late final List<DateTime> dateList;
+  late final ScrollController _scrollController;
   int selectedIndex = 0;
-  String selectedFilter = "All";
 
   @override
   void initState() {
     super.initState();
 
     final today = DateTime.now();
-    dateList = List.generate(30, (i) {
-      return DateTime(today.year, today.month, today.day + i);
+    
+    // Generate 90 days starting from 30 days ago to show history and future
+    dateList = List.generate(90, (i) {
+      return DateTime(today.year, today.month, today.day - 30 + i);
     });
 
-    selectedIndex = 0;
+    selectedIndex = dateList.indexWhere(
+      (d) => d.year == today.year && d.month == today.month && d.day == today.day,
+    );
+    if (selectedIndex == -1) selectedIndex = 0;
+
+    // Approximate width of DateChip + padding = 52 + 12 = 64
+    // Calculate initial offset to keep today's chip somewhat centered/visible
+    double initialOffset = (selectedIndex * 64.0) - 100.0;
+    if (initialOffset < 0) initialOffset = 0;
+    _scrollController = ScrollController(initialScrollOffset: initialOffset);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 
   DateTime get selectedDate => dateList[selectedIndex];
 
+  void _onDateSelected(int index) {
+    setState(() {
+      selectedIndex = index;
+    });
+  }
+
+  String _formatTimeAmPm(int hour24, int minute) {
+    final h = hour24 % 24;
+    final ampm = h >= 12 ? 'PM' : 'AM';
+    final hour12 = (h % 12 == 0) ? 12 : (h % 12);
+    final mm = minute.toString().padLeft(2, '0');
+    return '$hour12:$mm $ampm';
+  }
+
+  String _formatTimeRangeAmPm(double startHour, int durationMinutes) {
+    final startH = startHour.floor();
+    final startM = ((startHour - startH) * 60).round();
+
+    final endVirtualHour = startHour + (durationMinutes / 60.0);
+    final endH = endVirtualHour.floor();
+    final endM = ((endVirtualHour - endH) * 60).round();
+
+    final int startMClamped = startM == 60 ? 0 : startM;
+    final int startHClamped = startM == 60 ? startH + 1 : startH;
+
+    final int endMClamped = endM == 60 ? 0 : endM;
+    final int endHClamped = endM == 60 ? endH + 1 : endH;
+
+    return '${_formatTimeAmPm(startHClamped, startMClamped)} — ${_formatTimeAmPm(endHClamped, endMClamped)}';
+  }
+
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<TaskProvider>();
+    final dateKey =
+        '${selectedDate.year}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
 
-    final List<DueTask> dueList = provider.duesForDate(selectedDate);
+    // Build day entries directly from the Firestore-written ai.schedule[*] for this date.
+    // This fixes:
+    // - bug: only 2–3 tasks show (no longer using the capped global scheduler)
+    // - bug: tasks pile on one day (now keyed strictly by ai.schedule[*].date)
+    //
+    // Time blocking is UI-only: each task's microtasks are allocated equal-duration
+    // slices derived from (estimatedMinutes / totalMicrotasks), then stacked from 9:00 AM.
+    const int calendarStartHour = 9;
+    final baseDayTasks = <_BaseCalendarDayTask>[];
 
-    return SafeArea(
-      child: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Color(0xFFF8FAFF),
-              Color(0xFFFFFFFF),
-            ],
-          ),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: Column(
-            children: [
-              const SizedBox(height: 12),
+    for (final due in provider.dues) {
+      final taskModel = provider.getTask(due.id);
+      if (taskModel == null) continue;
 
-              // Top bar
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Icon(
-                    Icons.arrow_back_ios_new_rounded,
-                    size: 18,
-                    color: AppColors.textMuted,
-                  ),
-                  Text(
-                    "Calendar",
-                    style: AppText.heading2.copyWith(
-                      color: AppColors.textPrimary,
+      final aiDay = taskModel.aiScheduleData?.scheduleForDateKey(dateKey);
+      if (aiDay == null) continue;
+      if (aiDay.microtasks.isEmpty) continue; // no visible schedule content for this day
+
+      final totalMicrotasks = taskModel.totalMicrotasks;
+      final estimatedMinutes = taskModel.estimatedMinutes ??
+          taskModel.ai?.estimatedMinutes ??
+          due.durationMinutes ??
+          60;
+
+      final double minutesPerMicrotask =
+          (totalMicrotasks > 0) ? (estimatedMinutes / totalMicrotasks) : 0.0;
+
+      final int durationMinutes = math.max(
+        1,
+        (minutesPerMicrotask * aiDay.microtasks.length).round(),
+      );
+
+      baseDayTasks.add(_BaseCalendarDayTask(
+        task: due,
+        schedule: aiDay,
+        durationMinutes: durationMinutes,
+      ));
+    }
+
+    baseDayTasks.sort((a, b) {
+      final byDate = a.task.endDate.compareTo(b.task.endDate);
+      if (byDate != 0) return byDate;
+      return a.task.id.compareTo(b.task.id);
+    });
+
+    double cursorHour = calendarStartHour.toDouble();
+    final dayTasks = <_CalendarDayTask>[];
+    for (final t in baseDayTasks) {
+      final startHour = cursorHour;
+      final durationMinutes = t.durationMinutes;
+      final endHour = startHour + (durationMinutes / 60.0);
+      final timeRangeLabel = _formatTimeRangeAmPm(startHour, durationMinutes);
+
+      dayTasks.add(_CalendarDayTask(
+        task: t.task,
+        schedule: t.schedule,
+        durationMinutes: durationMinutes,
+        startHour: startHour,
+        blockId: '${t.task.id}_$dateKey',
+        timeRangeLabel: timeRangeLabel,
+      ));
+
+      cursorHour = endHour;
+    }
+
+    final int totalDailyMinutes =
+        dayTasks.fold<int>(0, (sum, t) => sum + t.durationMinutes);
+    final bool overEightHours = totalDailyMinutes > 8 * 60;
+
+    final int dayEndHour = math.max(
+      21,
+      calendarStartHour + ((totalDailyMinutes / 60.0).ceil()),
+    );
+
+    final scheduled = dayTasks
+        .map((entry) => CalendarScheduleEntry(
+              task: entry.task,
+              schedule: entry.schedule,
+              blockDurationMinutes: entry.durationMinutes,
+              blockStartHour: entry.startHour,
+              blockId: entry.blockId,
+            ))
+        .toList();
+
+    final listActive = dayTasks
+        .where((t) => !_entryDoneForCalendarTask(t.task, t.schedule))
+        .toList();
+    final listCompleted = dayTasks
+        .where((t) => _entryDoneForCalendarTask(t.task, t.schedule))
+        .toList();
+
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Header (Replaces original top bar with React styled header)
+            const CalendarHeader(),
+            
+            // Week day selector (90-day scrollable)
+            SizedBox(
+              height: 90,
+              child: ListView.builder(
+                controller: _scrollController,
+                scrollDirection: Axis.horizontal,
+                physics: const BouncingScrollPhysics(),
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                itemCount: dateList.length,
+                itemBuilder: (context, i) {
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 12),
+                    child: DateChip(
+                      date: dateList[i],
+                      isSelected: i == selectedIndex,
+                      onClick: () => _onDateSelected(i),
                     ),
-                  ),
-                  Icon(
-                    Icons.notifications_none_rounded,
-                    color: AppColors.textMuted,
-                  ),
-                ],
+                  );
+                },
               ),
+            ),
 
-              const SizedBox(height: 20),
+            // Divider
+            const Divider(height: 1, thickness: 1, color: AppColors.border),
 
-              // Date chips row
-              SizedBox(
-                height: 90,
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  physics: const BouncingScrollPhysics(),
-                  child: Row(
-                    children: List.generate(dateList.length, (i) {
-                      final date = dateList[i];
-                      final isSelected = i == selectedIndex;
-
-                      final month = _monthShort(date.month);
-                      final day = date.day.toString();
-                      final label = _dayShort(date.weekday);
-
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 12),
-                        child: GestureDetector(
-                          onTap: () => setState(() => selectedIndex = i),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            curve: Curves.easeOut,
-                            width: 64,
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            decoration: BoxDecoration(
-                              gradient: isSelected
-                                  ? const LinearGradient(
-                                      colors: [AppColors.primary, AppColors.accent],
-                                    )
-                                  : null,
-                              color: isSelected ? null : Colors.white,
-                              borderRadius: BorderRadius.circular(18),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: isSelected
-                                      ? AppColors.primary.withOpacity(0.3)
-                                      : AppColors.primary.withOpacity(0.08),
-                                  blurRadius: 12,
-                                  offset: const Offset(0, 4),
-                                ),
-                              ],
-                            ),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  month,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: isSelected
-                                        ? Colors.white.withOpacity(0.9)
-                                        : AppColors.textMuted,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  day,
-                                  style: TextStyle(
-                                    fontSize: 18,
-                                    color: isSelected ? Colors.white : AppColors.textPrimary,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  label,
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    color: isSelected
-                                        ? Colors.white.withOpacity(0.9)
-                                        : AppColors.textMuted,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      );
-                    }),
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 18),
-
-              // Filter pills
-              SizedBox(
-                height: 40,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
+            // Full-width timeline + scrollable summary (avoids narrow-column overflow).
+            Expanded(
+              child: SingleChildScrollView(
+                physics: const BouncingScrollPhysics(),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _FilterPill(
-                      text: "All",
-                      isActive: selectedFilter == "All",
-                      onTap: () => setState(() => selectedFilter = "All"),
-                    ),
-                    _FilterPill(
-                      text: "To do",
-                      isActive: selectedFilter == "To do",
-                      onTap: () => setState(() => selectedFilter = "To do"),
-                    ),
-                    _FilterPill(
-                      text: "In Progress",
-                      isActive: selectedFilter == "In Progress",
-                      onTap: () => setState(() => selectedFilter = "In Progress"),
-                    ),
-                    _FilterPill(
-                      text: "Completed",
-                      isActive: selectedFilter == "Completed",
-                      onTap: () => setState(() => selectedFilter = "Completed"),
-                    ),
-                  ],
-                ),
-              ),
-
-              const SizedBox(height: 18),
-
-              // Task list
-              Expanded(
-                child: dueList.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
+                    if (overEightHours)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+                        child: Row(
                           children: [
-                            Container(
-                              padding: const EdgeInsets.all(20),
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: AppColors.primary.withOpacity(0.1),
-                              ),
-                              child: Icon(
-                                Icons.calendar_today_rounded,
-                                size: 48,
-                                color: AppColors.primary.withOpacity(0.6),
-                              ),
+                            const Icon(
+                              Icons.warning_amber_rounded,
+                              size: 18,
+                              color: Colors.orange,
                             ),
-                            const SizedBox(height: 16),
+                            const SizedBox(width: 8),
                             Text(
-                              "No dues on this date",
-                              style: AppText.body.copyWith(
-                                color: AppColors.textMuted,
+                              'Daily workload exceeds 8h',
+                              style: AppText.caption.copyWith(
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.mutedForeground,
                               ),
                             ),
                           ],
                         ),
-                      )
-                    : ListView.builder(
-                        itemCount: dueList.length,
-                        itemBuilder: (context, i) {
-                          final t = dueList[i];
-                          return _CalendarTaskCard(task: t);
-                        },
                       ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// -------------------- UI WIDGETS --------------------
-
-class _FilterPill extends StatelessWidget {
-  final String text;
-  final bool isActive;
-  final VoidCallback onTap;
-
-  const _FilterPill({
-    required this.text,
-    required this.isActive,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 12),
-      child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-          decoration: BoxDecoration(
-            gradient: isActive
-                ? const LinearGradient(
-                    colors: [AppColors.primary, AppColors.accent],
-                  )
-                : null,
-            color: isActive ? null : AppColors.accent.withOpacity(0.15),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Text(
-            text,
-            style: AppText.bodyBold.copyWith(
-              fontSize: 13,
-              color: isActive ? Colors.white : AppColors.primary,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CalendarTaskCard extends StatelessWidget {
-  final DueTask task;
-
-  const _CalendarTaskCard({required this.task});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            Colors.white,
-            AppColors.accent.withOpacity(0.05),
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.primary.withOpacity(0.08),
-            blurRadius: 16,
-            offset: const Offset(0, 4),
-            spreadRadius: 0,
-          ),
-        ],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            height: 40,
-            width: 40,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  AppColors.primary.withOpacity(0.15),
-                  AppColors.secondary.withOpacity(0.1),
-                ],
-              ),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Icon(
-              Icons.assignment_outlined,
-              size: 20,
-              color: AppColors.primary,
-            ),
-          ),
-
-          const SizedBox(width: 14),
-
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  task.group,
-                  style: AppText.caption.copyWith(
-                    fontSize: 11,
-                    color: AppColors.textMuted,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  task.title,
-                  style: AppText.bodyBold.copyWith(
-                    fontSize: 15,
-                    color: AppColors.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Icon(
-                      Icons.access_time_rounded,
-                      size: 14,
-                      color: AppColors.primary,
+                    SizedBox(
+                      height: 560,
+                      child: CalendarDayView(
+                        selectedDate: selectedDate,
+                        tasks: scheduled,
+                        endHour: dayEndHour,
+                      ),
                     ),
-                    const SizedBox(width: 6),
-                    Text(
-                      "${task.durationMinutes} min",
-                      style: AppText.caption.copyWith(
-                        fontSize: 12,
-                        color: AppColors.primary,
+                    const Divider(height: 1, thickness: 1, color: AppColors.border),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (listActive.isNotEmpty) ...[
+                            Text(
+                              'TASKS (${listActive.length})',
+                              style: AppText.caption.copyWith(
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.mutedForeground,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            ...listActive.map(
+                              (entry) => Padding(
+                                key: ValueKey(entry.blockId),
+                                padding: const EdgeInsets.only(bottom: 10),
+                                child: DueCard(
+                                  task: entry.task,
+                                  dateKey: dateKey,
+                                  scheduleOverride: entry.schedule,
+                                  timeRangeLabel: entry.timeRangeLabel,
+                                ),
+                              ),
+                            ),
+                          ],
+                          if (listCompleted.isNotEmpty) ...[
+                            if (listActive.isNotEmpty) const SizedBox(height: 16),
+                            Text(
+                              'DONE (${listCompleted.length})',
+                              style: AppText.caption.copyWith(
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.mutedForeground,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            ...listCompleted.map(
+                              (entry) => Padding(
+                                key: ValueKey(entry.blockId),
+                                padding: const EdgeInsets.only(bottom: 10),
+                                child: DueCard(
+                                  task: entry.task,
+                                  dateKey: dateKey,
+                                  scheduleOverride: entry.schedule,
+                                  timeRangeLabel: entry.timeRangeLabel,
+                                ),
+                              ),
+                            ),
+                          ],
+                          if (listActive.isEmpty && listCompleted.isEmpty)
+                            Text(
+                              'No tasks',
+                              style: AppText.body.copyWith(
+                                color: AppColors.mutedForeground,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                   ],
-                )
-              ],
-            ),
-          ),
-
-          Container(
-            height: 28,
-            width: 28,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  AppColors.secondary.withOpacity(0.3),
-                  AppColors.secondary.withOpacity(0.2),
-                ],
+                ),
               ),
-              borderRadius: BorderRadius.circular(10),
             ),
-            child: Icon(
-              Icons.bookmark_rounded,
-              size: 16,
-              color: AppColors.secondary,
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 }
 
-// -------------------- HELPER FUNCTIONS --------------------
-
-String _monthShort(int m) {
-  const months = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-  ];
-  return months[m - 1];
-}
-
-String _dayShort(int w) {
-  const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-  return days[w - 1];
-}

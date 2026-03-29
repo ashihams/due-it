@@ -12,6 +12,8 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+  // Disable App Check for development: do not call FirebaseAppCheck.activate().
+  // If you add firebase_app_check, use a debug provider in dev or leave it off.
   runApp(
     ChangeNotifierProvider(
       create: (_) => TaskProvider(),

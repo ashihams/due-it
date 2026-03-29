@@ -43,7 +43,7 @@ dependencies:
   cloud_firestore: ^5.4.0
   firebase_storage: ^12.3.0
 
-  url_launcher: ^6.3.0
+  url_launcher: ^6.2.0
 
   # HTTP client for API calls
   http: ^1.2.0
