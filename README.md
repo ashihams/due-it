@@ -1,4 +1,5 @@
-# DueIt Monorepo
+# DueIt
+
 
 AI-powered task planning system with:
 - Flutter frontend app (`due_it/`)
