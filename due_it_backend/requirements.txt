@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+firebase-admin
+google-genai
+python-dateutil
+requests==2.31.0
+

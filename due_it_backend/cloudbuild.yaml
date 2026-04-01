@@ -1,0 +1,11 @@
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - build
+      - "-t"
+      - "asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/due-it-ai"
+      - "."
+
+images:
+  - "asia-south1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/due-it-ai"
+

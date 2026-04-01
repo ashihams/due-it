@@ -1,0 +1,9 @@
+# Keep image small; do not exclude *.py
+__pycache__/
+*.py[cod]
+*.pyo
+.git/
+.gitignore
+.env
+.env.*
+*.local
