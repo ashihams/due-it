@@ -8,6 +8,11 @@ AI-powered task planning system with:
 - Gemini-based planning
 - Notion + TinyFish integrations for docs/resources/workflow automation
 
+  ## 🎥 Demo
+  
+👉 [Click here to watch the demo](https://github.com/user-attachments/assets/e8ebd612-6906-4c57-93f2-1eb351ba73bb)
+
+
 ## Repository Layout
 
 ```text
