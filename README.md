@@ -10,7 +10,7 @@ AI-powered task planning system with:
 
   ## 🎥 Demo
   
-👉 [Click here to watch the demo](https://github.com/user-attachments/assets/e8ebd612-6906-4c57-93f2-1eb351ba73bb)
+https://youtu.be/7NDvSj6Elyw?si=IF97oXPK37IeMwNH
 
 
 ## Repository Layout
